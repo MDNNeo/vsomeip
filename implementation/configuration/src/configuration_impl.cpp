@@ -17,6 +17,12 @@
 #include <boost/foreach.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
+#include "ara/iam/policy_query_client/policy_query_error_code.h"
+#include "ara/iam/policy_query_client/policy_query_client_impl.h"
+#include "ara/iam/policy_query_client/access_control_decision.h"
+#include "ara/iam/policy_query_client/access_control_predicate.h"
+
+
 #include <vsomeip/constants.hpp>
 #include <vsomeip/plugins/application_plugin.hpp>
 #include <vsomeip/plugins/pre_configuration_plugin.hpp>
@@ -71,8 +77,9 @@ configuration_impl::configuration_impl()
       log_version_interval_(10),
       permissions_shm_(VSOMEIP_DEFAULT_SHM_PERMISSION),
       umask_(VSOMEIP_DEFAULT_UMASK_LOCAL_ENDPOINTS),
-      policy_enabled_(false),
+      policy_enabled_(true),
       check_credentials_(false),
+      policyQueryClient_(std::make_shared<ara::iam::policyquery::PolicyQueryClientImpl>())
       network_("vsomeip"),
       e2e_enabled_(false),
       log_memory_(false),
@@ -98,9 +105,10 @@ configuration_impl::configuration_impl(const configuration_impl &_other)
       buffer_shrink_threshold_(_other.buffer_shrink_threshold_),
       permissions_shm_(VSOMEIP_DEFAULT_SHM_PERMISSION),
       umask_(VSOMEIP_DEFAULT_UMASK_LOCAL_ENDPOINTS),
+      policy_enabled_(true),
+      policyQueryClient_(_other.policyQueryClient_),
       endpoint_queue_limit_external_(_other.endpoint_queue_limit_external_),
       endpoint_queue_limit_local_(_other.endpoint_queue_limit_local_) {
-
     applications_.insert(_other.applications_.begin(), _other.applications_.end());
     services_.insert(_other.services_.begin(), _other.services_.end());
 
@@ -141,7 +149,6 @@ configuration_impl::configuration_impl(const configuration_impl &_other)
     for (auto i = 0; i < ET_MAX; i++)
         is_configured_[i] = _other.is_configured_[i];
 
-    policy_enabled_ = _other.policy_enabled_;
     check_credentials_ = _other.check_credentials_;
     network_ = _other.network_;
     e2e_enabled_ = _other.e2e_enabled_;
@@ -1626,7 +1633,6 @@ void configuration_impl::load_policies(const element &_element) {
         if (!optional) {
             return;
         }
-        policy_enabled_ = true;
         auto found_policy = _element.tree_.get_child("security");
         for (auto its_security = found_policy.begin();
                 its_security != found_policy.end(); ++its_security) {
@@ -2582,85 +2588,90 @@ bool configuration_impl::check_credentials(client_t _client, uint32_t _uid,
 }
 
 bool configuration_impl::is_client_allowed(client_t _client, service_t _service,
-        instance_t _instance) const {
-    if (!policy_enabled_) {
-        return true;
-    }
-    auto its_client = policies_.find(_client);
-
-    // Search for generic policy if no specific could be found
-    if (its_client == policies_.end())
-            its_client = policies_.find(ANY_CLIENT);
-
-    if (its_client == policies_.end()) {
-        if (!check_credentials_) {
-            VSOMEIP_INFO << "vSomeIP Security: Client 0x" << std::hex << _client
-                    << " isn't allowed to communicate with service/instance "
-                    << _service << "/" << _instance
-                    << " but will be allowed due to audit mode is active!";
-        }
-        return !check_credentials_;
-    }
-
-    auto its_service = its_client->second->services_.find(std::make_pair(_service, _instance));
-    if (its_client->second->allow_what_
-            && its_service != its_client->second->services_.end()) {
-        return true;
-    } else if (!its_client->second->allow_what_
-            && its_service == its_client->second->services_.end()) {
-        return true;
-    }
-
-    if (!check_credentials_) {
-        VSOMEIP_INFO << "vSomeIP Security: Client 0x" << std::hex << _client
-                << " isn't allowed to communicate with service/instance "
-                << _service << "/" << _instance
-                << " but will be allowed due to audit mode is active!";
-    }
-
-    return !check_credentials_;
+                                           instance_t _instance) const {
+    return perform_policy_query(predicate_type_e::PT_CONSUME_SERVICE, _client, _service, _instance);
 }
 
 bool configuration_impl::is_offer_allowed(client_t _client, service_t _service,
-        instance_t _instance) const {
-    if (!policy_enabled_) {
-        return true;
-    }
-
-    auto its_client = policies_.find(_client);
-
-    // Search for generic policy if no specific could be found
-    if (its_client == policies_.end())
-        its_client = policies_.find(ANY_CLIENT);
-
-    if (its_client == policies_.end()) {
-        if (!check_credentials_) {
-            VSOMEIP_INFO << "vSomeIP Security: Client 0x" << std::hex << _client
-                    << " isn't allowed to offer service/instance "
-                    << _service << "/" << _instance
-                    << " but will be allowed due to audit mode is active!";
-        }
-        return !check_credentials_;
-    }
-
-    auto its_offer = its_client->second->offers_.find(std::make_pair(_service, _instance));
-    if (its_client->second->allow_what_
-            && its_offer != its_client->second->offers_.end()) {
-        return true;
-    } else if (!its_client->second->allow_what_
-            && its_offer == its_client->second->offers_.end()) {
-        return true;
-    }
-
-    if (!check_credentials_) {
-        VSOMEIP_INFO << "vSomeIP Security: Client 0x" << std::hex << _client
-                << " isn't allowed to offer service/instance "
-                << _service << "/" << _instance
-                << " but will be allowed due to audit mode is active!";
-    }
-
-    return !check_credentials_;
+                                          instance_t _instance) const {
+    return perform_policy_query(predicate_type_e::PT_OFFER_SERVICE, _client, _service, _instance);
 }
+
+bool configuration_impl::perform_policy_query(const predicate_type_e _predicate_type, const client_t _client,
+                                              const service_t _service, const instance_t _instance) const {
+    using ara::iam::policyquery::PolicyQueryErrorCode;
+    using ara::iam::policyquery::AccessControlPredicate;
+    using ara::iam::policyquery::AccessControlDecision;
+
+    if (policyQueryClient_ == nullptr) {
+        VSOMEIP_ERROR << "The PolicyQueryClient is not set up correctly. Disallowing requested action.";
+        return false;
+    }
+
+    const std::string user_id = encode_user_id(_client);
+    const std::string predicate_name = encode_predicate(_predicate_type, _service, _instance);
+    const AccessControlPredicate predicate = {predicate_name};
+
+    AccessControlDecision decision = AccessControlDecision::Forbidden;
+    const PolicyQueryErrorCode error_code = policyQueryClient_->DoesUserHaveAccess(user_id, predicate,
+                                                                                   &decision);
+
+    if (error_code == PolicyQueryErrorCode::kSuccess) {
+        if(decision == AccessControlDecision::Allowed) {
+            return true;
+        } else {
+            VSOMEIP_WARNING << "Action was forbidden by the Access Manager: "
+                            << user_id << " " << predicate_name;
+            return false;
+        }
+    }
+    else {
+        VSOMEIP_ERROR << "A request to the Access Manager failed with code " << static_cast<int>(error_code);
+        return false;
+    }
+}
+
+std::string configuration_impl::encode_user_id(const client_t _client) const {
+    // Example output:
+    // client_0x1111
+
+    std::stringstream user_id_stream;
+    user_id_stream << "client_0x"
+                   << std::setfill('0') << std::setw(sizeof(client_t) * 2) << std::hex
+                   << _client;
+    return user_id_stream.str();
+}
+
+std::string configuration_impl::encode_predicate(const predicate_type_e _predicate_type,
+                                                 const service_t _service,
+                                                 const instance_t _instance) const {
+    // Example output:
+    // useService_0x1111_0x0001
+
+    std::string predicate_type_name;
+    switch (_predicate_type) {
+        case predicate_type_e::PT_CONSUME_SERVICE: {
+            predicate_type_name = "useService";
+            break;
+        }
+        case predicate_type_e::PT_OFFER_SERVICE: {
+            predicate_type_name = "offerService";
+            break;
+        }
+    }
+
+    std::stringstream predicate_stream;
+    predicate_stream << predicate_type_name
+                     << "_0x"
+                     << std::setfill('0') << std::setw(sizeof(service_t) * 2) << std::hex
+                     << _service
+                     << "_0x"
+                     << std::setfill('0') << std::setw(sizeof(instance_t) * 2) << std::hex
+                     << _instance;
+
+    return predicate_stream.str();
+}
+
 
 std::map<plugin_type_e, std::set<std::string>> configuration_impl::get_plugins(
             const std::string &_name) const {

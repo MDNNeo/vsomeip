@@ -20,9 +20,11 @@
 #include "watchdog.hpp"
 #include "service_instance_range.hpp"
 #include "policy.hpp"
+#include "ara/iam/policy_query_client/policy_query_client_interface.h"
 #include "../../e2e_protection/include/e2exf/config.hpp"
 #include "e2e.hpp"
 #include "debounce.hpp"
+
 
 namespace vsomeip {
 namespace cfg {
@@ -41,6 +43,15 @@ struct element {
     bool operator<(const element &_other) const {
         return (name_ < _other.name_);
     }
+};
+
+
+/**
+ * Enum encoding the kinds of predicates that may be queried from the Access Manager.
+ */
+enum class predicate_type_e {
+    PT_CONSUME_SERVICE,
+    PT_OFFER_SERVICE
 };
 
 class configuration_impl:
@@ -270,6 +281,35 @@ private:
 
     void load_endpoint_queue_sizes(const element &_element);
 
+    /**
+     * Ask the AccessManager whether the given client may offer/use the given service instance.
+     *
+     * \param _predicate_type Enum value encoding what kind of predicate needs to be queried
+     * \param _client The client ID relevant to the request
+     * \param _service The service ID relevant to the request
+     * \param _instance The service instance ID relevant to the request
+     * \returns True if the requested action should be allowed
+     */
+    bool perform_policy_query(const predicate_type_e _predicate_type, const client_t _client,
+                              const service_t _service, const instance_t _instance) const;
+
+    /**
+     * Helper method to transform a client ID into a format the Access Manager understands.
+     *
+     * \param _client The client ID that needs to be communicated to the AM.
+     */
+    std::string encode_user_id(const client_t _client) const;
+
+    /**
+     * Helper method to build the predicate name for a specific operation.
+     *
+     * \param _predicate_type Encodes the type of operation the predicate will be associated with.
+     * \param _service The service ID the predicate will be associated with.
+     * \param _instance The service instance ID the predicate will be associated with.
+     */
+    std::string encode_predicate(const predicate_type_e _predicate_type, const service_t _service,
+                                 const instance_t _instance) const;
+
 private:
     std::mutex mutex_;
 
@@ -375,8 +415,9 @@ protected:
     std::uint32_t umask_;
 
     std::map<client_t, std::shared_ptr<policy>> policies_;
-    bool policy_enabled_;
+    const bool policy_enabled_;
     bool check_credentials_;
+    std::shared_ptr<ara::iam::policyquery::PolicyQueryClientInterface> policyQueryClient_;
 
     std::string network_;
     std::string configuration_path_;

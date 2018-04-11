@@ -121,6 +121,12 @@ link_directories(
     ${DLT_LIBDIR}
 )
 
+
+# Adaptive Autosar IAM library for policy queries
+include(FindPkgConfig)
+pkg_check_modules(POLICYQUERYCLIENT PolicyQueryClient>=1.0 REQUIRED)
+
+
 # Base library
 file(GLOB vsomeip_SRC
     "implementation/endpoints/src/*.cpp"
@@ -174,7 +180,10 @@ list(SORT vsomeip-cfg_SRC)
 
 add_library(vsomeip-cfg SHARED ${vsomeip-cfg_SRC})
 set_target_properties (vsomeip-cfg PROPERTIES VERSION ${VSOMEIP_VERSION} SOVERSION ${VSOMEIP_MAJOR_VERSION})
-target_link_libraries(vsomeip-cfg vsomeip ${Boost_LIBRARIES} ${USE_RT} ${DL_LIBRARY} ${SystemD_LIBRARIES})
+target_link_libraries(vsomeip-cfg
+                      vsomeip
+                      ${Boost_LIBRARIES} ${USE_RT} ${DL_LIBRARY} ${SystemD_LIBRARIES}
+                      ${POLICYQUERYCLIENT_LDFLAGS})
 
 # Service-Discovery library
 file(GLOB vsomeip-sd_SRC
