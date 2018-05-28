@@ -79,7 +79,7 @@ configuration_impl::configuration_impl()
       umask_(VSOMEIP_DEFAULT_UMASK_LOCAL_ENDPOINTS),
       policy_enabled_(true),
       check_credentials_(false),
-      policyQueryClient_(std::make_shared<ara::iam::policyquery::PolicyQueryClientImpl>())
+      policyQueryClient_(std::make_shared<ara::iam::policyquery::PolicyQueryClientImpl>()),
       network_("vsomeip"),
       e2e_enabled_(false),
       log_memory_(false),
